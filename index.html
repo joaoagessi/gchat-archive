@@ -277,7 +277,41 @@ var currentTab = 'all';
 var currentFilteredMsgs = [];
 var currentPage = 0;
 var PAGE_SIZE = 150;
-var STORAGE_KEY = 'gchat_archive_v3';
+// ── INDEXEDDB STORAGE ────────────────────────────────────────────────────────
+var DB_NAME = 'gchat_archive'; var DB_VERSION = 1; var DB_STORE = 'data'; var db = null;
+function openDB(cb) {
+  if (db) { cb(db); return; }
+  var req = indexedDB.open(DB_NAME, DB_VERSION);
+  req.onupgradeneeded = function(e) { e.target.result.createObjectStore(DB_STORE); };
+  req.onsuccess = function(e) { db = e.target.result; cb(db); };
+  req.onerror = function() { cb(null); };
+}
+function dbSave(key, val, done) {
+  openDB(function(d) {
+    if (!d) { done&&done(false); return; }
+    var tx = d.transaction(DB_STORE,'readwrite');
+    tx.objectStore(DB_STORE).put(val, key);
+    tx.oncomplete = function(){ done&&done(true); };
+    tx.onerror = function(){ done&&done(false); };
+  });
+}
+function dbLoad(key, done) {
+  openDB(function(d) {
+    if (!d) { done(null); return; }
+    var tx = d.transaction(DB_STORE,'readonly');
+    var req = tx.objectStore(DB_STORE).get(key);
+    req.onsuccess = function(){ done(req.result||null); };
+    req.onerror = function(){ done(null); };
+  });
+}
+function dbClear(done) {
+  openDB(function(d) {
+    if (!d) { done&&done(); return; }
+    var tx = d.transaction(DB_STORE,'readwrite');
+    tx.objectStore(DB_STORE).clear();
+    tx.oncomplete = function(){ done&&done(); };
+  });
+}
 var myName = '';
 var globalSearchTimer = null;
 
@@ -298,23 +332,18 @@ function parseDate(str) {
   return null;
 }
 
-// ── STARTUP: load from localStorage ──────────────────────────────────────────
-(function() {
-  try {
-    var raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return;
-    var saved = JSON.parse(raw);
-    if (saved && saved.conversations && saved.conversations.length) {
-      saved.conversations.forEach(function(c) {
-        c.messages.forEach(function(m) { m.date = m.date ? new Date(m.date) : null; });
-      });
-      allConversations = saved.conversations;
-      myName = saved.myName || '';
-      showApp(true);
-      showToast('Dados carregados do armazenamento local');
-    }
-  } catch(e) {}
-})();
+// ── STARTUP: load from IndexedDB ─────────────────────────────────────────────
+dbLoad('archive', function(saved) {
+  if (saved && saved.conversations && saved.conversations.length) {
+    saved.conversations.forEach(function(c) {
+      c.messages.forEach(function(m) { m.date = m.date ? new Date(m.date) : null; });
+    });
+    allConversations = saved.conversations;
+    myName = saved.myName || '';
+    showApp(true);
+    showToast('Dados carregados ✓');
+  }
+});
 
 // ── FILE LOADING ──────────────────────────────────────────────────────────────
 document.getElementById('file-input').addEventListener('change', handleFiles);
@@ -710,19 +739,21 @@ function clearGlobalSearch() {
 
 // ── PERSIST ───────────────────────────────────────────────────────────────────
 function saveData() {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ conversations: allConversations, myName: myName, savedAt: new Date().toISOString() }));
-    document.getElementById('save-bar').style.display = 'none';
-    document.getElementById('btn-save').style.display = 'none';
-    document.getElementById('saved-indicator').style.display = 'inline-block';
-    showToast('Dados salvos ✓');
-  } catch(e) {
-    showToast(e.name === 'QuotaExceededError' ? 'Arquivo grande demais para localStorage (limite ~5MB).' : 'Erro ao salvar: ' + e.message);
-  }
+  showToast('Salvando...');
+  dbSave('archive', { conversations: allConversations, myName: myName, savedAt: new Date().toISOString() }, function(ok) {
+    if (ok) {
+      document.getElementById('save-bar').style.display = 'none';
+      document.getElementById('btn-save').style.display = 'none';
+      document.getElementById('saved-indicator').style.display = 'inline-block';
+      showToast('Dados salvos ✓');
+    } else {
+      showToast('Erro ao salvar no IndexedDB.');
+    }
+  });
 }
 function clearData() {
   if (!confirm('Apagar os dados salvos? Você precisará reimportar o Takeout.')) return;
-  localStorage.removeItem(STORAGE_KEY); location.reload();
+  dbClear(function() { location.reload(); });
 }
 
 // ── HELPERS ───────────────────────────────────────────────────────────────────
